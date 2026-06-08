@@ -1,0 +1,308 @@
+const API_URL = "Your API Endpoint";
+const API_KEY = "Your API Key";
+
+const CACHE_TTL_MS = 60 * 60 * 1000;
+const REFRESH_MINUTES = 10;
+const CACHE_FILE_NAME = "token_heatmap_v3_auto_range.json";
+
+const UI_THEME = {
+  bg: Color.dynamic(new Color("#ffffff"), new Color("#0d1117")),
+  text: Color.dynamic(new Color("#24292f"), new Color("#c9d1d9")),
+};
+
+const CHART_PALETTE = {
+  text: new Color("#888888"),
+  
+  stripes: new Color("#888888", 0.05),
+
+  cells: {
+    level0: new Color("#888888", 0.15),
+    
+    futureStroke: new Color("#888888", 0.1),
+
+    level1: new Color("#9be9a8"), 
+    level2: new Color("#40c463"),
+    level3: new Color("#30a14e"),
+  },
+  
+  todayStroke: new Color("#888888", 0.8)
+};
+
+const LAYOUT = {
+  weeks: 26, 
+  boxSize: 16,
+  gap: 4,
+  startX: 10,
+  startY: 30,
+  widthPad: 20,
+  height: 220
+};
+
+if (config.runsInWidget) {
+  const widget = await createWidget();
+  Script.setWidget(widget);
+} else {
+  const widget = await createWidget();
+  widget.presentMedium();
+}
+Script.complete();
+
+async function createWidget() {
+  const w = new ListWidget();
+  w.backgroundColor = UI_THEME.bg;
+  w.backgroundImage = createTransparentStripes();
+  w.setPadding(12, 18, 12, 12);
+  w.refreshAfterDate = new Date(Date.now() + REFRESH_MINUTES * 60 * 1000);
+
+  const header = w.addStack();
+  header.layoutHorizontally();
+  header.centerAlignContent();
+
+  const title = header.addText("Token 使用分布");
+  title.font = Font.heavySystemFont(12);
+  title.textColor = UI_THEME.text;
+
+  header.addSpacer();
+  w.addSpacer(8);
+
+  const dataMap = await getHistoryData();
+  const chartImage = drawSixMonthHeatmap(dataMap);
+  const img = w.addImage(chartImage);
+  img.applyFittingContentMode();
+  img.centerAlignImage();
+
+  return w;
+}
+
+function drawSixMonthHeatmap(dataMap) {
+  const { weeks, boxSize, gap, startX, startY, widthPad, height } = LAYOUT;
+  const W = startX + weeks * (boxSize + gap) + widthPad;
+  const H = height;
+
+  const ctx = new DrawContext();
+  ctx.size = new Size(W, H);
+  ctx.opaque = false;
+  ctx.respectScreenScale = true;
+
+  const SCALE = Device.screenScale();
+  const px = (v) => Math.round(v * SCALE) / SCALE;
+
+  const now = new Date();
+  const todayKey = formatDateKey(now);
+
+  const gridStartDate = startOfWeek(addDays(now, -((weeks - 1) * 7)));
+
+  let lastLabelMonth = -1;
+  let lastLabelX = -50;
+
+  for (let col = 0; col < weeks; col++) {
+    for (let row = 0; row < 7; row++) {
+      const d = addDays(gridStartDate, col * 7 + row);
+      const dateKey = formatDateKey(d);
+      
+      const val = dataMap[dateKey] || 0;
+
+      const x = px(startX + col * (boxSize + gap));
+      const y = px(startY + row * (boxSize + gap));
+      const rect = new Rect(x, y, boxSize, boxSize);
+
+      if (row === 0) {
+        const m = d.getMonth();
+        if (m !== lastLabelMonth && (x - lastLabelX > 25)) {
+          ctx.setFont(Font.boldSystemFont(16));
+          ctx.setTextColor(CHART_PALETTE.text);
+          ctx.drawText(getMonthName(m), new Point(x, 5));
+          lastLabelMonth = m;
+          lastLabelX = x;
+        }
+      }
+
+      const path = new Path();
+      path.addRoundedRect(rect, 3, 3);
+      ctx.addPath(path);
+
+      const isFuture = dateKey > todayKey;
+      if (isFuture) {
+        ctx.setStrokeColor(CHART_PALETTE.cells.futureStroke);
+        ctx.setLineWidth(1); 
+        ctx.strokePath();
+        continue;
+      }
+
+      ctx.setFillColor(levelColor(val));
+      ctx.fillPath();
+
+      if (dateKey === todayKey) {
+        ctx.setStrokeColor(CHART_PALETTE.todayStroke);
+        ctx.setLineWidth(3);
+        ctx.strokePath();
+      }
+    }
+  }
+
+  drawInternalLegend(ctx, W, H);
+  return ctx.getImage();
+}
+
+function levelColor(val) {
+  if (val === 0) return CHART_PALETTE.cells.level0;
+  if (val < 500000) return CHART_PALETTE.cells.level1;
+  if (val < 1000000) return CHART_PALETTE.cells.level2;
+  return CHART_PALETTE.cells.level3;
+}
+
+function drawInternalLegend(ctx, W, H) {
+  const legendSize = 12;
+  const legendGap = 4;
+  const rightMargin = -10;
+  const bottomMargin = 10;
+
+  const items = [
+    CHART_PALETTE.cells.level0,
+    CHART_PALETTE.cells.level1,
+    CHART_PALETTE.cells.level2,
+    CHART_PALETTE.cells.level3
+  ];
+
+  const totalW = items.length * legendSize + (items.length - 1) * legendGap + 80;
+  const startX = W - totalW - rightMargin;
+  const startY = H - legendSize - bottomMargin;
+
+  ctx.setFont(Font.heavySystemFont(12));
+  ctx.setTextColor(CHART_PALETTE.text);
+  ctx.drawText("轻度", new Point(startX, startY - 2));
+
+  let x = startX + 35;
+  for (const c of items) {
+    const rect = new Rect(x, startY, legendSize, legendSize);
+    ctx.setFillColor(c);
+    const p = new Path();
+    p.addRoundedRect(rect, 2, 2);
+    ctx.addPath(p);
+    ctx.fillPath();
+    x += legendSize + legendGap;
+  }
+
+  ctx.drawText(" 重度", new Point(x + 2, startY - 2));
+}
+
+async function getHistoryData() {
+  const fm = FileManager.local();
+  const cachePath = fm.joinPath(fm.documentsDirectory(), CACHE_FILE_NAME);
+
+  const readCache = () => {
+    if (!fm.fileExists(cachePath)) return null;
+    try { return JSON.parse(fm.readString(cachePath)); } catch { return null; }
+  };
+
+  const cache = readCache();
+  const nowTs = Date.now();
+  if (cache?.ts && cache?.data && (nowTs - cache.ts) < CACHE_TTL_MS) return cache.data;
+
+  try {
+    const req = new Request(API_URL);
+    req.headers = { 
+        "X-N8N-API-KEY": API_KEY,
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "Accept": "application/json"
+    };
+    req.timeoutInterval = 15;
+
+    const rawString = await req.loadString();
+    
+    if (rawString.includes("Authorization data is wrong")) {
+        throw new Error("API Key 错误");
+    }
+
+    const json = JSON.parse(rawString);
+    const root = Array.isArray(json) && json.length > 0 ? json[0] : json;
+
+    let targetArray = [];
+    
+    const candidates = [
+        root.history,
+        root.history_all,
+        root.history_365d,
+        root.history_180d,
+        root.history_90d,
+        root.history_30d,
+        root.history_7d,
+        json
+    ];
+
+    for (const c of candidates) {
+        if (Array.isArray(c) && c.length > targetArray.length) {
+            targetArray = c;
+        }
+    }
+
+    const map = {};
+    for (const item of targetArray) {
+      let d = item?.date || "";
+      if (d.includes("/")) d = d.replace(/\//g, "-");
+      
+      const v = item?.val ?? item?.today ?? item?.tokens ?? 0;
+      
+      if (d && d.length >= 10) {
+          map[d.substring(0, 10)] = (Number.parseInt(v, 10) || 0);
+      }
+    }
+
+    const todayKey = formatDateKey(new Date());
+    if (map[todayKey] === undefined) {
+        let liveVal = root.today ?? 0;
+        map[todayKey] = Number.parseInt(liveVal, 10) || 0;
+    }
+
+    if (Object.keys(map).length > 0) {
+        fm.writeString(cachePath, JSON.stringify({ ts: nowTs, data: map }));
+    }
+    
+    return map;
+  } catch (e) {
+    console.error("Fetch Error: " + e.message);
+    return cache?.data || {};
+  }
+}
+
+function createTransparentStripes() {
+  const ctx = new DrawContext();
+  const W = 600, H = 400;
+  ctx.size = new Size(W, H);
+  ctx.opaque = false;
+  ctx.respectScreenScale = true;
+
+  const SCALE = Device.screenScale();
+  const px = (v) => Math.round(v * SCALE) / SCALE;
+
+  const gap = 8;
+  const lineW = 2;
+
+  ctx.setFillColor(CHART_PALETTE.stripes);
+  for (let x = 0; x < W; x += gap) ctx.fillRect(new Rect(px(x), 0, lineW, H));
+  return ctx.getImage();
+}
+
+function getMonthName(i) {
+  return ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][i] || "";
+}
+
+function formatDateKey(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function startOfWeek(date) {
+  const d = new Date(date);
+  d.setDate(d.getDate() - d.getDay());
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
